@@ -1,82 +1,128 @@
 pipeline {
-    agent any 
+    agent any
     
-    tools{
-        jdk 'jdk11'
+    tools {
+        jdk 'java17'
         maven 'maven3'
+        // owasp 'OWASP Dependency-Check Vulnerabilities'
     }
-    
     environment {
-        SCANNER_HOME=tool 'sonar-scanner'
+        SCANNER_HOME= tool 'sonar-scanner'                      
+        
+        /// THIS IS FOR DOCKER CRED TO PUSH 
+        APP_NAME = "petlinic-app"      
+        RELEASE = "1.0.0"
+        DOCKER_USER = "raemondarellano"
+        DOCKER_PASS = 'jenkins-docker-credentials'              
+        IMAGE_NAME = "${DOCKER_USER}" + "/" + "${APP_NAME}"  
+        IMAGE_TAG = "${RELEASE}-${BUILD_NUMBER}"
+        // JENKINS_API_TOKEN = credentials("JENKINS_API_TOKEN")
+        
     }
-    
     stages{
-        
-        stage("Git Checkout"){
-            steps{
-                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/jaiswaladi246/Petclinic.git'
+        stage("Cleanup Workspace"){
+                steps {
+                cleanWs()
+                }
+        }
+
+        stage("Checkout from SCM"){
+                steps {
+                    git branch: 'main', credentialsId: 'github', url: 'https://github.com/iam-arellano/Petclinic'
+                }
+        }
+
+        stage("Build Application"){
+            steps {
+                sh "mvn clean package"
             }
+
+       }
+
+       stage("Test Application"){
+           steps {
+                 sh "mvn test"
+           }
+       }
+
+       stage("SonarQube Analysis"){
+           steps {
+	           script {
+		        withSonarQubeEnv(credentialsId: 'sonarqube_access') { 
+                        sh "mvn sonar:sonar"
+		        }
+	           }	
+           }
+       }
+
+       stage("Quality Gate"){
+           steps {
+               script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonarqube_access'
+                }	
+            }
+
         }
         
-        stage("Compile"){
-            steps{
-                sh "mvn clean compile"
-            }
-        }
         
-         stage("Test Cases"){
-            steps{
-                sh "mvn test"
-            }
-        }
+      stage('OWASP Dependency-Check Vulnerabilities') {
+        steps {
+        dependencyCheck additionalArguments: ''' 
+                    -o './'
+                    -s './'
+                    -f 'ALL' 
+                    --prettyPrint''', odcInstallation: 'OWASP Dependency-Check Vulnerabilities'
         
-        stage("Sonarqube Analysis "){
-            steps{
-                withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Petclinic \
-                    -Dsonar.java.binaries=. \
-                    -Dsonar.projectKey=Petclinic '''
-    
+        dependencyCheckPublisher pattern: 'dependency-check-report.xml'
+      }
+    }
+
+        stage("Build & Push Docker Image") {
+            steps {
+                script {
+                    docker.withRegistry('',DOCKER_PASS) {
+                        docker_image = docker.build "${IMAGE_NAME}"
+                    }
+
+                    docker.withRegistry('',DOCKER_PASS) {
+                        docker_image.push("${IMAGE_TAG}")
+                        docker_image.push('latest')
+                    }
                 }
             }
-        }
-        
-        stage("OWASP Dependency Check"){
-            steps{
-                dependencyCheck additionalArguments: '--scan ./ --format HTML ', odcInstallation: 'DP'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-            }
-        }
-        
-         stage("Build"){
+       }
+       
+       
+          stage("Build"){
             steps{
                 sh " mvn clean install"
             }
         }
         
-        stage("Docker Build & Push"){
-            steps{
-                script{
-                   withDockerRegistry(credentialsId: '58be877c-9294-410e-98ee-6a959d73b352', toolName: 'docker') {
-                        
-                        sh "docker build -t image1 ."
-                        sh "docker tag image1 adijaiswal/pet-clinic123:latest "
-                        sh "docker push adijaiswal/pet-clinic123:latest "
-                    }
-                }
-            }
+     // to scan docker image 
+        stage("Trivy Scan") {
+           steps {
+               script {
+	            sh ('docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image raemondarellano/petlinic-app:latest --no-progress --scanners vuln  --exit-code 0 --severity HIGH,CRITICAL --format table')
+               }
+           }
+       }
+       
+        stage ('Cleanup Artifacts') {
+           steps {
+               script {
+                    sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG}"
+                    sh "docker rmi ${IMAGE_NAME}:latest"
+               }
+          }
         }
         
-        stage("TRIVY"){
-            steps{
-                sh " trivy image adijaiswal/pet-clinic123:latest"
-            }
-        }
         
-        stage("Deploy To Tomcat"){
+      stage("Deploy To Tomcat"){
             steps{
-                sh "cp  /var/lib/jenkins/workspace/CI-CD/target/petclinic.war /opt/apache-tomcat-9.0.65/webapps/ "
+                sh "cp  /var/lib/jenkins/workspace/petclinic/target/petclinic.war /opt/tomcat/apache-tomcat-10.1.19/webapps/"
             }
         }
-    }
+
+   }
 }
